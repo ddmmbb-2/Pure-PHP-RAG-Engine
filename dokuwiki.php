@@ -104,16 +104,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($userQuestion) && !isset($_P
             $listStr .= "ID:$i | Title:{$d['title']}\n";
         }
 
-        $resC = callAiChat([
-            [
-                "role" => "system",
-                "content" => "You are a document relevance scorer.\n\nTask:\nEvaluate if each title can answer the question.\n\nScoring standard:\n100 = Perfectly matches the question\n70 = Relevant\n40 = Slightly relevant\n0 = Irrelevant\n\nScore all IDs.\n\nOutput ONLY JSON:\n{\"scores\":[{\"id\":0,\"score\":85}]}"
-            ],
-            [
-                "role" => "user",
-                "content" => "Question: \"$userQuestion\"\n\nList to evaluate:\n$listStr"
-            ]
-        ], true);
+       $resC = callAiChat([
+            [
+                "role" => "system",
+                "content" => "You are a document relevance scorer.\n\n[System Time Calibration]\nCurrent time is: $currentTime\nIf the user's question contains time-relative words (e.g., 'current', 'now', 'this year', 'latest'), use this current time to evaluate which document title is most relevant.\n\nTask:\nEvaluate if each title can answer the question.\n\nScoring standard:\n100 = Perfectly matches the question\n70 = Relevant\n40 = Slightly relevant\n0 = Irrelevant\n\nScore all IDs.\n\nOutput ONLY JSON:\n{\"scores\":[{\"id\":0,\"score\":85}]}"
+            ],
+            [
+                "role" => "user",
+                "content" => "Question: \"$userQuestion\"\n\nList to evaluate:\n$listStr"
+            ]
+        ], true);
 
         // Analysis Log Block
         $analysisLogFile = __DIR__ . '/rerank_analysis.log';
