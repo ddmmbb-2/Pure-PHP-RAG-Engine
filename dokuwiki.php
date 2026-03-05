@@ -68,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($userQuestion) && !isset($_P
     foreach ($activeTags as $tag) {
         $q = "%$tag%";
         try {
-            $stmt = $db->prepare("SELECT title, description, content FROM documents WHERE title LIKE ? OR tags LIKE ? OR content LIKE ? LIMIT 20");
+            $stmt = $db->prepare("SELECT title, description, content FROM documents WHERE title LIKE ? OR tags LIKE ? OR content LIKE ? LIMIT 100");
             $stmt->execute([$q, $q, $q]);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
