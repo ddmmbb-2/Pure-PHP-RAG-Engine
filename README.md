@@ -63,5 +63,16 @@ Finally, the system feeds the extracted, highly relevant snippets into the LLM w
 ## 📂 File Overview
 
 * **`index.php`**: The document management dashboard. Handles file uploads, manual edits, deletions, and triggers AI processing for ingestion (summarization and tagging).
+
+---
+
+## 🎯 Ideal Use Cases & Limitations
+
+To keep this engine as lightweight and accessible as possible, it makes specific architectural trade-offs. It is highly optimized for certain environments while purposefully ignoring others.
+
+* **The Sweet Spot: Many Small Documents:** This system shines when managing hundreds of smaller, discrete text entries (e.g., wiki pages, company policies, daily notes, or FAQ snippets). 
+* **Limitation with Massive Single Files:** It is *not* currently designed to ingest a single 100-page book as one database row. Because the dynamic windowing extracts an 800-character snippet around the first keyword match, relying on a single massive text blob will limit the RAG's ability to cross-reference multiple sections of that same document.
+* **Plain Text Only:** The engine currently only processes raw text (pasted text or `.txt` uploads). There is no built-in implementation for parsing PDFs, Word documents, or performing OCR on images.
+* **Optimized for Local, Open-Source LLMs:** You do not need expensive, paid API keys (like OpenAI or Anthropic) to run this. The prompt engineering and reranking logic are specifically tuned to work beautifully with local Ollama instances running smaller models, such as `gemma3:12b` or `llama3`. It is built for a 100% free, private, and localized workflow.
 * **`dokuwiki.php`**: The user-facing chat interface. Manages the entire Retrieval and Generation pipeline (Query -> Tag -> SQL Search -> AI Rerank -> Snippet Extraction -> Final Response).
 * **`settings.php`**: Global configuration panel for the API endpoint and model selection. Settings are saved directly to the SQLite database.
