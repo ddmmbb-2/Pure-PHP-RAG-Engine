@@ -50,11 +50,23 @@ Finally, the system feeds the extracted, highly relevant snippets into the LLM w
 
 ---
 
+## 🎯 Ideal Use Cases & Limitations
+
+To keep this engine as lightweight and accessible as possible, it makes specific architectural trade-offs. It is highly optimized for certain environments while purposefully ignoring others.
+
+* **The Sweet Spot: Many Small Documents:** This system shines when managing hundreds of smaller, discrete text entries (e.g., wiki pages, company policies, daily notes, or FAQ snippets). 
+* **Limitation with Massive Single Files:** It is *not* currently designed to ingest a single massive file (like a 100-page book) as one database row. Because the dynamic windowing extracts an 800-character snippet around the first keyword match, relying on a single massive text blob will severely limit the RAG's ability to cross-reference multiple sections of that same document.
+* **Plain Text Only:** The engine currently only processes raw text (pasted text or `.txt` uploads). There is no built-in implementation for parsing PDFs, Word documents, or performing OCR on images.
+* **Optimized for Local, Open-Source LLMs:** You do not need expensive, paid API keys (like OpenAI or Anthropic) to run this. The prompt engineering and reranking logic are specifically tuned to work beautifully with local Ollama instances running smaller models, such as `gemma3:12b` or `llama3`. It is built for a 100% free, private, and localized workflow.
+* **Network & Deployment Constraints:** This system is meant to be an internal tool. If you are deploying this on a Local Area Network (LAN) for multiple devices to access, remember that you must configure your host machine's Ollama instance to accept external incoming connections (e.g., by setting the environment variable `OLLAMA_HOST=0.0.0.0`). However, exposing this entire setup directly to the public internet (WAN) is **highly discouraged** due to the complexities of securing the API and the lack of built-in authentication.
+
+---
+
 ## 🚀 Setup Instructions
 
 1. Place `index.php`, `dokuwiki.php`, and `settings.php` into your web server's public directory.
 2. Ensure the folder has write permissions so the application can automatically create `documents.db` and the necessary log files.
-3. Open `settings.php` in your browser to configure your OpenAI-compatible API endpoint (such as a local Ollama instance or OpenAI's API) and the model name you wish to use.
+3. Open `settings.php` in your browser to configure your OpenAI-compatible API endpoint (such as your local Ollama URL) and the model name you wish to use.
 4. Navigate to `index.php` to start uploading documents. The system will automatically call the LLM to generate titles, summaries, and searchable tags for each document.
 5. Open `dokuwiki.php` to interact with your knowledge base!
 
@@ -63,16 +75,5 @@ Finally, the system feeds the extracted, highly relevant snippets into the LLM w
 ## 📂 File Overview
 
 * **`index.php`**: The document management dashboard. Handles file uploads, manual edits, deletions, and triggers AI processing for ingestion (summarization and tagging).
-
----
-
-## 🎯 Ideal Use Cases & Limitations
-
-To keep this engine as lightweight and accessible as possible, it makes specific architectural trade-offs. It is highly optimized for certain environments while purposefully ignoring others.
-
-* **The Sweet Spot: Many Small Documents:** This system shines when managing hundreds of smaller, discrete text entries (e.g., wiki pages, company policies, daily notes, or FAQ snippets). 
-* **Limitation with Massive Single Files:** It is *not* currently designed to ingest a single 100-page book as one database row. Because the dynamic windowing extracts an 800-character snippet around the first keyword match, relying on a single massive text blob will limit the RAG's ability to cross-reference multiple sections of that same document.
-* **Plain Text Only:** The engine currently only processes raw text (pasted text or `.txt` uploads). There is no built-in implementation for parsing PDFs, Word documents, or performing OCR on images.
-* **Optimized for Local, Open-Source LLMs:** You do not need expensive, paid API keys (like OpenAI or Anthropic) to run this. The prompt engineering and reranking logic are specifically tuned to work beautifully with local Ollama instances running smaller models, such as `gemma3:12b` or `llama3`. It is built for a 100% free, private, and localized workflow.
 * **`dokuwiki.php`**: The user-facing chat interface. Manages the entire Retrieval and Generation pipeline (Query -> Tag -> SQL Search -> AI Rerank -> Snippet Extraction -> Final Response).
 * **`settings.php`**: Global configuration panel for the API endpoint and model selection. Settings are saved directly to the SQLite database.
