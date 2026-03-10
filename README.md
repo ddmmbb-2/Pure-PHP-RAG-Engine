@@ -69,7 +69,17 @@ To keep this engine as lightweight and accessible as possible, it makes specific
 3. Open `settings.php` in your browser to configure your OpenAI-compatible API endpoint (such as your local Ollama URL) and the model name you wish to use.
 4. Navigate to `index.php` to start uploading documents. The system will automatically call the LLM to generate titles, summaries, and searchable tags for each document.
 5. Open `dokuwiki.php` to interact with your knowledge base!
-6. **Prompt Tuning:** If search results are poor or the generated tags during upload aren't accurate, you can adjust the internal system prompts to better match your chosen LLM. Different models respond differently to specific phrasing; once you've fine-tuned the prompts for your specific model, the RAG pipeline will operate smoothly.
+6. **Prompt Tuning & Model Calibration (Crucial for Local LLMs):** Different LLMs (e.g., Llama 3, Gemma, Mistral) respond differently to specific phrasing, especially when strictly instructed to output JSON. If you find that the search results are poor, tags are hallucinated, or the system fails to parse the AI's response, you will need to adjust the internal system prompts to match your chosen model's behavior. 
+   
+   You can easily tweak the prompts by searching for the following sections in the code:
+   
+   * **In `index.php` (Document Ingestion & Tagging):**
+       * Find `get_ai_analysis()`: Adjust the prompt here if the AI struggles to generate a proper `title`, `description`, or `tags` JSON array during upload.
+       * Find `get_ai_rewrite()`: Adjust the summarization prompt here if the "Rewrite" button isn't formatting your articles the way you prefer.
+   * **In `dokuwiki.php` (RAG Retrieval & Generation):**
+       * **Step A (Keyword Extraction):** Look for `callAiChat` under `Step A`. If the AI isn't extracting good search tags from the user's question, adjust the `"Return JSON: {\"tags\":[]}"` prompt.
+       * **Step C (Reranking):** Look for the `"You are a document relevance scorer..."` system prompt. This controls how strictly the AI filters out irrelevant documents. 
+       * **Step D/E (Final Response):** Look for `[Important Reasoning Instruction]`. You can modify this prompt to change the personality, language, or output format (e.g., forcing it to answer only in bullet points or in a specific language) of the final answer.
 
 ---
 
