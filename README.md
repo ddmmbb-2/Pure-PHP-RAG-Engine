@@ -69,6 +69,7 @@ To keep this engine as lightweight and accessible as possible, it makes specific
 3. Open `settings.php` in your browser to configure your OpenAI-compatible API endpoint (such as your local Ollama URL) and the model name you wish to use.
 4. Navigate to `index.php` to start uploading documents. The system will automatically call the LLM to generate titles, summaries, and searchable tags for each document.
 5. Open `dokuwiki.php` to interact with your knowledge base!
+6. **Prompt Tuning:** If search results are poor or the generated tags during upload aren't accurate, you can adjust the internal system prompts to better match your chosen LLM. Different models respond differently to specific phrasing; once you've fine-tuned the prompts for your specific model, the RAG pipeline will operate smoothly.
 
 ---
 
