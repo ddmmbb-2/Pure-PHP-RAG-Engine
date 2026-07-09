@@ -168,38 +168,56 @@ A lightweight, minimalist, and **Zero Dependencies** Retrieval-Augmented Generat
 
 ---
 
+
 ## 🧪 RAG 運作原理詳解 / How RAG Works
 
-整個 RAG 流程發生在 `index.php` 的 POST 請求處理中，包含以下階段：
+整個 RAG 流程發生在 `index.php` 的 POST 請求處理中，包含以下階段：  
+*The entire RAG pipeline is executed in the POST request handler of `index.php`, consisting of the following stages:*
 
-1. **關鍵字萃取 (Keyword Extraction)**
-   - 使用者提問 → 呼叫 LLM 萃取成逗號分隔的關鍵字（如 `AI,機器學習,2024`）。
-   - 為避免 JSON 格式錯誤，採用純文字列表而非 JSON 陣列，大幅提高穩定性。
+1. **關鍵字萃取 (Keyword Extraction)**  
+   - 使用者提問 → 呼叫 LLM 萃取成逗號分隔的關鍵字（如 `AI,機器學習,2024`）。  
+   - 為避免 JSON 格式錯誤，採用純文字列表而非 JSON 陣列，大幅提高穩定性。  
+   - *The user's question is sent to the LLM to extract comma-separated keywords (e.g., `AI,machine learning,2024`).*  
+   - *To avoid JSON parsing errors, a plain text list is used instead of a JSON array, greatly improving reliability.*
 
-2. **資料庫全文檢索 (Database Retrieval)**
-   - 將所有文章的 `title`, `summary`, `tags` 欄位與每個關鍵字進行**大小寫無關**比對。
-   - 若任一關鍵字命中，該文章進入計分階段。
+2. **資料庫全文檢索 (Database Retrieval)**  
+   - 將所有文章的 `title`, `summary`, `tags` 欄位與每個關鍵字進行**大小寫無關**比對。  
+   - 若任一關鍵字命中，該文章進入計分階段。  
+   - *Each keyword is matched against the `title`, `summary`, and `tags` fields of all articles using a **case-insensitive** comparison.*  
+   - *If any keyword matches, the article proceeds to the scoring phase.*
 
-3. **權重計分與時間補償 (Scoring & Time Bonus)**
-   - 基礎分：標籤完全相等 +15，標題包含 +10，摘要包含 +5。
-   - 時間補償：先依照建立時間排序，最新文章可獲得最高 +10 的時間獎勵分數，越舊遞減。
-   - 最終分數 = 基礎分 + 時間獎勵分，依此重新排序。
+3. **權重計分與時間補償 (Scoring & Time Bonus)**  
+   - 基礎分：標籤完全相等 +15，標題包含 +10，摘要包含 +5。  
+   - 時間補償：先依照建立時間排序，最新文章可獲得最高 +10 的時間獎勵分數，越舊遞減。  
+   - 最終分數 = 基礎分 + 時間獎勵分，依此重新排序。  
+   - *Base score: exact tag match +15, title contains +10, summary contains +5.*  
+   - *Time bonus: articles are first sorted by creation time; the newest receives up to +10, decreasing for older articles.*  
+   - *Final score = base score + time bonus; articles are re-ranked accordingly.*
 
-4. **Context 組合 (Context Assembly)**
-   - 從最高分文章開始，擷取 `標題` + `完整內文`，合併成單一字串。
-   - 控制總字數在 **6000 字元**以內（可於程式碼中修改 `$charLimit`），避免超出 LLM 上下文限制。
+4. **Context 組合 (Context Assembly)**  
+   - 從最高分文章開始，擷取 `標題` + `完整內文`，合併成單一字串。  
+   - 控制總字數在 **6000 字元**以內（可於程式碼中修改 `$charLimit`），避免超出 LLM 上下文限制。  
+   - *Starting from the highest-scoring article, the `title` and full `content` are concatenated into a single string.*  
+   - *Total character count is kept under **6000 characters** (adjustable via `$charLimit`) to avoid exceeding the LLM's context window.*
 
-5. **LLM 回答生成 (LLM Generation)**
-   - 系統提示詞要求 LLM 嚴格依據提供的參考資料回答，並強制使用使用者提問的語言。
-   - 將最近幾輪對話歷史（最多 4000 字元）與當前問題一併傳送，保持上下文連貫。
-   - 呼叫 LLM API，取得最終回答。
+5. **LLM 回答生成 (LLM Generation)**  
+   - 系統提示詞要求 LLM 嚴格依據提供的參考資料回答，並強制使用使用者提問的語言。  
+   - 將最近幾輪對話歷史（最多 4000 字元）與當前問題一併傳送，保持上下文連貫。  
+   - 呼叫 LLM API，取得最終回答。  
+   - *The system prompt instructs the LLM to answer strictly based on the provided references and to use the same language as the user's question.*  
+   - *Recent conversation history (up to 4000 characters) is included with the current query to maintain context.*  
+   - *The LLM API is called and the final answer is returned.*
 
-6. **前端渲染與參考來源 (Frontend Rendering)**
-   - AI 回答以 Markdown 解析後顯示。
-   - 下方自動附加「📖 參考文件」清單，包含文件標題（可點擊查看全文）與附件下載連結。
-   - 這些參考資訊會存入 Session，重新整理頁面也不會消失。
+6. **前端渲染與參考來源 (Frontend Rendering)**  
+   - AI 回答以 Markdown 解析後顯示。  
+   - 下方自動附加「📖 參考文件」清單，包含文件標題（可點擊查看全文）與附件下載連結。  
+   - 這些參考資訊會存入 Session，重新整理頁面也不會消失。  
+   - *The AI response is parsed as Markdown and displayed.*  
+   - *A "📖 References" list is automatically appended, showing document titles (clickable to view full content) and attachment download links.*  
+   - *Reference data is stored in the session, so it persists even after a page refresh.*
 
 ---
+
 
 ## ⚖️ 權重計分邏輯 / Scoring Algorithm
 
