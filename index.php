@@ -1,300 +1,487 @@
 <?php
-// 1. Environment & Database Settings (Robust setup)
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
+session_start();
 
-// Prevent script termination if the user closes the browser during long AI tasks
-ignore_user_abort(true); 
-// Remove execution time limit for lengthy AI rewriting/analysis
-set_time_limit(0); 
+// ---------- 1. 語言與初始化設定 ----------
+$lang = $_SESSION['lang'] ?? 'zh';
+if (isset($_GET['lang'])) {
+    $lang = $_GET['lang'];
+    $_SESSION['lang'] = $lang;
+    header('Location: index.php');
+    exit;
+}
 
-$db = new PDO('sqlite:documents.db');
+// 清除記憶
+if (isset($_GET['clear'])) {
+    $_SESSION['chat_history'] = [];
+    header('Location: index.php');
+    exit;
+}
+
+// 初始化對話紀錄
+if (!isset($_SESSION['chat_history'])) {
+    $_SESSION['chat_history'] = [];
+}
+
+// 介面文字
+$texts = [
+    'zh' => [
+        'title' => 'RAG 智能對話',
+        'manage_data' => '管理資料庫',
+        'clear_memory' => '清除記憶',
+        'type_message' => '輸入您的問題...',
+        'send' => '發送',
+        'bot_typing' => 'AI 思考中...',
+        'sys_error' => '系統發生錯誤：',
+        'reference' => '參考文件',
+        'attachments' => '附件',
+        'welcome' => '您好！我是基於您的資料庫運作的 AI 助手。請問有什麼我可以幫忙的？'
+    ],
+    'en' => [
+        'title' => 'RAG Chat Assistant',
+        'manage_data' => 'Manage Database',
+        'clear_memory' => 'Clear Memory',
+        'type_message' => 'Type your message...',
+        'send' => 'Send',
+        'bot_typing' => 'AI is thinking...',
+        'sys_error' => 'System error: ',
+        'reference' => 'References',
+        'attachments' => 'Attachments',
+        'welcome' => 'Hello! I am an AI assistant powered by your database. How can I help you today?'
+    ]
+];
+$t = $texts[$lang];
+
+// ---------- 2. 資料庫與設定檔讀取 ----------
+$db = new PDO('sqlite:articles.db');
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-// Enable WAL mode and timeout to completely prevent SQLite locking/malformed issues
-$db->exec("PRAGMA journal_mode = WAL;");
-$db->exec("PRAGMA busy_timeout = 10000;");
-$db->exec("PRAGMA synchronous = NORMAL;");
-
-// Initialize Tables
-$db->exec("CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY, title TEXT, description TEXT, content TEXT, 
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP, tags TEXT
-)");
-$db->exec("CREATE TABLE IF NOT EXISTS settings (key_name TEXT PRIMARY KEY, key_value TEXT)");
-
-// Load Settings
-$settings = [];
-$stmt = $db->query("SELECT * FROM settings");
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    $settings[$row['key_name']] = $row['key_value'];
+$settingsFile = 'settings.json';
+if (!file_exists($settingsFile)) {
+    die("請先至 Dataset 頁面設定 LLM API。");
 }
-$apiUrl = $settings['api_url'] ?? 'http://127.0.0.1:11434/v1/chat/completions';
-$modelName = $settings['model_name'] ?? 'llama3';
+$settings = json_decode(file_get_contents($settingsFile), true);
 
-$message = "";
+// 取得附件的函數
+function getAttachments($articleId) {
+    global $db;
+    $stmt = $db->prepare("SELECT filename, filepath FROM attachments WHERE article_id = ?");
+    $stmt->execute([$articleId]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
 
-// 2. AI Core Functions
-function call_ai_api($url, $model, $system_prompt, $user_prompt, $is_json = false) {
-    $data = [
-        "model" => $model,
-        "messages" => [
-            ["role" => "system", "content" => $system_prompt],
-            ["role" => "user", "content" => $user_prompt]
-        ],
-        "temperature" => 0.1
+// ---------- 3. 核心 LLM 呼叫函數 (支援對話陣列) ----------
+function callLLM($messages, $temperature = 0.3) {
+    global $settings;
+    $url = $settings['api_url'];
+    $model = $settings['model'];
+    $apiKey = $settings['api_key'];
+
+    $payload = [
+        'model' => $model,
+        // 使用 array_values 確保送出的是乾淨的 JSON 陣列 (避免出現 {"0":...})
+        'messages' => array_values($messages),
+        'temperature' => $temperature
     ];
-    if ($is_json) $data["response_format"] = ["type" => "json_object"];
+
+    $headers = ['Content-Type: application/json'];
+    if ($settings['api_type'] === 'openai' && !empty($apiKey)) {
+        $headers[] = 'Authorization: Bearer ' . $apiKey;
+    }
 
     $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($data),
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-        CURLOPT_TIMEOUT => 120
-    ]);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
     $response = curl_exec($ch);
-    if (curl_errno($ch)) return "Error: " . curl_error($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
+
+    if ($httpCode !== 200) {
+        throw new Exception("LLM API error (HTTP $httpCode): $response");
+    }
+
+    $data = json_decode($response, true);
+    if (isset($data['choices'][0]['message']['content'])) {
+        return trim($data['choices'][0]['message']['content']);
+    }
+    if (isset($data['message']['content'])) {
+        return trim($data['message']['content']);
+    }
+    throw new Exception("Unexpected API response: $response");
+}
+
+// ---------- 4. 處理 AJAX 聊天請求 (RAG 核心邏輯) ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
+    header('Content-Type: application/json');
     
-    $result = json_decode($response, true);
-    $content = $result['choices'][0]['message']['content'] ?? "";
-
-    if ($is_json) {
-        $content = trim($content);
-        $content = preg_replace('/^```json/i', '', $content);
-        $content = preg_replace('/```$/', '', $content);
-        return json_decode(trim($content), true);
+    // 嚴格檢查空訊息
+    $userMsg = trim((string)$_POST['message']);
+    if ($userMsg === '') {
+        echo json_encode(['status' => 'error', 'message' => '訊息內容不可為空']);
+        exit;
     }
-    return $content;
-}
+    
+    try {
+        // 【步驟 1】：LLM 針對使用者問題 -> 拆解成標籤
+        $tagPrompt = "請從以下使用者的提問中，萃取出關鍵字標籤。請務必依據使用者輸入的語言進行萃取。只回傳一個 JSON 陣列（例如：[\"關鍵字1\", \"關鍵字2\"]），不要加上引號、```json 等任何多餘標記。\n\n提問：\n" . $userMsg;
+        $tagMessages = [
+            ['role' => 'system', 'content' => 'You are a keyword extraction bot.'],
+            ['role' => 'user', 'content' => $tagPrompt]
+        ];
+        $tagResponse = callLLM($tagMessages, 0.1);
+        $tagResponse = preg_replace('/^```(json)?\s*|\s*```$/m', '', $tagResponse);
+        $extractedTags = json_decode($tagResponse, true);
+        
+        if (!is_array($extractedTags)) {
+            $extractedTags = [$userMsg];
+        }
 
-function get_ai_analysis($apiUrl, $modelName, $content) {
-    $meta_prompt = "Please read the following text and return in JSON format: 1. 'title' 2. 'description' (approx 50 words) 3. 'tags' (array). Content:\n" . mb_substr($content, 0, 2000);
-    return call_ai_api($apiUrl, $modelName, "You are a professional assistant. Reply strictly in JSON.", $meta_prompt, true);
-}
-
-function get_ai_rewrite($apiUrl, $modelName, $content) {
-    $rewrite_prompt = "Please rewrite and condense the following article, keeping key information using bullet points. Original text:\n" . $content;
-    return call_ai_api($apiUrl, $modelName, "You are a professional document summarizer.", $rewrite_prompt, false);
-}
-
-// 3. Handle POST Requests (Add/Delete/Edit)
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? '';
-    $id = isset($_POST['id']) ? (int)$_POST['id'] : 0;
-
-    if ($action === 'delete' && $id > 0) {
-        $stmt = $db->prepare("DELETE FROM documents WHERE id = ?");
-        $stmt->execute([$id]);
-        $message = "🗑️ Document ID: $id deleted";
-    }
-    elseif ($action === 'update_manual' && $id > 0) {
-        $stmt = $db->prepare("UPDATE documents SET title = ?, description = ?, tags = ?, content = ? WHERE id = ?");
-        $stmt->execute([$_POST['title'], $_POST['description'], $_POST['tags'], $_POST['content'], $id]);
-        $message = "📝 ID: $id manually updated successfully!";
-    }
-    elseif (($action === 'regenerate' || $action === 'rewrite') && $id > 0) {
-        $stmt = $db->prepare("SELECT content FROM documents WHERE id = ?");
-        $stmt->execute([$id]);
-        $doc = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($doc) {
-            $newContent = $doc['content'];
-            $isRewriteSuccess = false;
-
-            // Perform long AI operations first without locking the database
-            if ($action === 'rewrite') {
-                $rewritten = get_ai_rewrite($apiUrl, $modelName, $doc['content']);
-                if ($rewritten && strpos($rewritten, "Error") !== 0) {
-                    $newContent = $rewritten;
-                    $isRewriteSuccess = true;
+        // 【步驟 2 & 3】：標籤拿去搜尋資料庫，並計算權重分數
+        $stmt = $db->query("SELECT id, title, summary, tags, content, created_at FROM articles ORDER BY created_at DESC");
+        $allArticles = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        $scoredArticles = [];
+        foreach ($allArticles as $article) {
+            $score = 0;
+            $dbTags = json_decode($article['tags'], true) ?: [];
+            
+            foreach ($extractedTags as $searchTag) {
+                if (trim($searchTag) === '') continue; // 略過空的標籤
+                $searchTagLower = mb_strtolower($searchTag);
+                
+                if (mb_strpos(mb_strtolower($article['title']), $searchTagLower) !== false) $score += 10;
+                if (mb_strpos(mb_strtolower($article['summary']), $searchTagLower) !== false) $score += 5;
+                foreach ($dbTags as $t) {
+                    if (mb_strtolower($t) === $searchTagLower) $score += 15;
                 }
             }
             
-            // AI Tag Analysis
-            $aiData = get_ai_analysis($apiUrl, $modelName, $newContent);
-            
-            if ($aiData) {
-                $title = $aiData['title'] ?? 'Untitled Document';
-                $desc = $aiData['description'] ?? 'No description';
-                $tags_str = (isset($aiData['tags']) && is_array($aiData['tags'])) ? implode(',', $aiData['tags']) : 'General';
-                
-                // Atomic Update to prevent DB corruption
-                $stmt = $db->prepare("UPDATE documents SET title = ?, description = ?, tags = ?, content = ? WHERE id = ?");
-                $stmt->execute([$title, $desc, $tags_str, $newContent, $id]);
-                
-                $message = $isRewriteSuccess ? "✍️ ID: $id AI rewritten and analyzed successfully!" : "✅ ID: $id AI analyzed successfully!";
-            } else {
-                $message = "❌ ID: $id AI analysis failed. Database not updated.";
+            if ($score > 0) {
+                $article['base_score'] = $score;
+                $scoredArticles[] = $article;
             }
         }
-    } elseif (empty($action)) {
-        // Add new document
-        $content = $_POST['pasted_text'] ?? '';
-        if (isset($_FILES['file_upload']) && $_FILES['file_upload']['error'] === UPLOAD_ERR_OK) {
-            $content = file_get_contents($_FILES['file_upload']['tmp_name']);
+
+        usort($scoredArticles, function($a, $b) {
+            return strtotime($b['created_at']) - strtotime($a['created_at']);
+        });
+
+        for ($i = 0; $i < count($scoredArticles); $i++) {
+            $timeBonus = max(0, 10 - $i);
+            $scoredArticles[$i]['final_score'] = $scoredArticles[$i]['base_score'] + $timeBonus;
         }
-        if (!empty($content)) {
-            $aiData = get_ai_analysis($apiUrl, $modelName, $content);
-            $title = $aiData['title'] ?? 'Untitled Document';
-            $desc = $aiData['description'] ?? 'No description';
-            $tags = (isset($aiData['tags']) && is_array($aiData['tags'])) ? implode(',', $aiData['tags']) : 'General';
+
+        usort($scoredArticles, function($a, $b) {
+            return $b['final_score'] <=> $a['final_score'];
+        });
+
+        // 【步驟 4】：準備 Context 給 LLM
+        $contextText = "";
+        $referenceDocs = [];
+        $charLimit = 6000;
+        $currentCharCount = 0;
+
+        foreach ($scoredArticles as $article) {
+            $docStr = "[文件ID: {$article['id']}] 標題: {$article['title']}\n內容: {$article['content']}\n\n";
+            if ($currentCharCount + mb_strlen($docStr) > $charLimit) break;
             
-            $stmt = $db->prepare("INSERT INTO documents (title, description, content, tags) VALUES (?, ?, ?, ?)");
-            $stmt->execute([$title, $desc, $content, $tags]);
-            $message = "✅ Document uploaded and analyzed successfully!";
+            $contextText .= $docStr;
+            $currentCharCount += mb_strlen($docStr);
+            
+            $referenceDocs[] = [
+                'id' => $article['id'],
+                'title' => $article['title'],
+                'attachments' => getAttachments($article['id'])
+            ];
         }
+
+        // 【步驟 5】：LLM 依據問題與上下文列表作答
+        $sysPrompt = "你是一個專業的資料庫 RAG AI 助手。請『嚴格依據使用者提問的語言』來回答（使用者用中文問就用中文回答，用英文問就用英文回答）。
+請根據以下提供的【參考資料】來回答問題。如果參考資料中沒有答案，請根據你的知識回答，但要註明資料庫中未包含此資訊。
+【參考資料開始】\n" . ($contextText ?: "無相關資料") . "\n【參考資料結束】";
+
+        // 準備對話歷史 (嚴格過濾空訊息，避免報錯)
+        $messages = [];
+        $messages[] = ['role' => 'system', 'content' => (string)$sysPrompt];
+        
+        $historyCharCount = 0;
+        $tempHistory = [];
+        for ($i = count($_SESSION['chat_history']) - 1; $i >= 0; $i--) {
+            $h = $_SESSION['chat_history'][$i];
+            
+            // 嚴密防禦：若歷史紀錄中缺少 role、content 或 content 為空，則捨棄不送給 LLM
+            if (!isset($h['role']) || !isset($h['content']) || trim((string)$h['content']) === '') {
+                continue; 
+            }
+            
+            $historyCharCount += mb_strlen($h['content']);
+            if ($historyCharCount > 4000) break; 
+            
+            // 確保只傳送合法的 key 格式
+            array_unshift($tempHistory, [
+                'role' => $h['role'],
+                'content' => (string)$h['content']
+            ]);
+        }
+        $messages = array_merge($messages, $tempHistory);
+        
+        // 加入本次問題 (已確認非空)
+        $messages[] = ['role' => 'user', 'content' => $userMsg];
+
+        // 呼叫 LLM 產出最終回答
+        $finalAnswer = callLLM($messages, 0.5);
+
+        // 將本次對話寫入 Session (確保寫入前非空)
+        if (trim($finalAnswer) !== '') {
+            $_SESSION['chat_history'][] = ['role' => 'user', 'content' => $userMsg];
+            $_SESSION['chat_history'][] = ['role' => 'assistant', 'content' => $finalAnswer];
+        }
+
+        // 【步驟 6】：回傳最終答案與參考文件
+        echo json_encode([
+            'status' => 'success',
+            'answer' => $finalAnswer,
+            'references' => $referenceDocs
+        ]);
+        exit;
+
+    } catch (Exception $e) {
+        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+        exit;
     }
 }
-
-// 4. Search Logic
-$search = $_GET['q'] ?? '';
-$sql = "SELECT * FROM documents";
-$params = [];
-if (!empty($search)) {
-    $sql .= " WHERE title LIKE ? OR tags LIKE ? OR description LIKE ?";
-    $params = ["%$search%", "%$search%", "%$search%"];
-}
-$sql .= " ORDER BY id DESC";
-$stmt = $db->prepare($sql);
-$stmt->execute($params);
-$docs = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="<?= $lang ?>">
 <head>
     <meta charset="UTF-8">
-    <title>AI Document Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><?= $t['title'] ?></title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
-        body { font-family: 'Segoe UI', sans-serif; max-width: 1000px; margin: 0 auto; background: #f4f7f6; padding: 20px; }
-        .navbar { background: #343a40; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; color: white; }
-        .nav-links a { color: white; text-decoration: none; margin-left: 15px; font-weight: bold; padding: 8px 12px; border-radius: 4px; transition: 0.3s; }
-        .nav-links a:hover { background: #495057; }
-        .nav-links .active-link { background: #007bff; }
-        
-        .card { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom: 25px; }
-        textarea { width: 100%; height: 100px; border: 1px solid #ccc; padding: 10px; border-radius: 4px; box-sizing: border-box; font-family: inherit; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-        th, td { padding: 15px; border-bottom: 1px solid #eee; text-align: left; }
-        th { background: #007bff; color: white; }
-        
-        .btn { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; text-decoration: none; display: inline-block; font-size: 0.85em; }
-        .btn-blue { background: #007bff; color: white; }
-        .btn-green { background: #28a745; color: white; }
-        .btn-red { background: #dc3545; color: white; }
-        .btn-outline { border: 1px solid #ccc; background: white; color: #666; }
-        
-        .message { padding: 12px; background: #d4edda; color: #155724; margin-bottom: 20px; border-radius: 4px; border: 1px solid #c3e6cb; }
-        .tag { display: inline-block; background: #e9ecef; padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-right: 5px; color: #495057; }
-        
-        /* Modal Style */
-        #editModal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; }
-        .modal-content { background:white; width:600px; margin: 50px auto; padding:20px; border-radius:8px; }
+        body { background-color: #f0f2f5; height: 100vh; display: flex; flex-direction: column; }
+        .chat-container { flex: 1; overflow-y: auto; padding: 20px; }
+        .message-row { margin-bottom: 20px; display: flex; }
+        .message-row.user { justify-content: flex-end; }
+        .message-bubble { max-width: 75%; padding: 12px 16px; border-radius: 18px; line-height: 1.5; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+        .message-row.user .message-bubble { background-color: #0d6efd; color: white; border-bottom-right-radius: 4px; }
+        .message-row.assistant .message-bubble { background-color: white; color: #212529; border-bottom-left-radius: 4px; }
+        .chat-input-area { background-color: white; padding: 15px 20px; border-top: 1px solid #dee2e6; }
+        textarea.form-control { resize: none; border-radius: 20px; padding-left: 20px; padding-right: 20px; }
+        .ref-box { font-size: 0.85em; background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px; margin-top: 12px; }
+        .ref-box a { text-decoration: none; font-weight: 500; }
+        /* Markdown rendering basic styles */
+        .message-bubble pre { background: #2b2b2b; color: #f8f8f2; padding: 10px; border-radius: 5px; overflow-x: auto; margin-top: 10px;}
+        .message-bubble code { font-family: monospace; }
+/* Markdown 專屬美化樣式 */
+.message-bubble h1, .message-bubble h2, .message-bubble h3, .message-bubble h4 { font-weight: bold; margin-top: 12px; margin-bottom: 8px; line-height: 1.4; }
+.message-bubble h3 { font-size: 1.15rem; }
+.message-bubble ul, .message-bubble ol { padding-left: 1.5rem; margin-bottom: 10px; }
+.message-bubble li { margin-bottom: 4px; }
+.message-bubble p { margin-bottom: 10px; }
+.message-bubble p:last-child { margin-bottom: 0; }
+.message-bubble strong { color: #000; font-weight: 700; }
     </style>
+<!-- 引入 marked.js 解析 Markdown (使用穩定的 4.3.0 版本) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
 </head>
 <body>
 
-    <div class="navbar">
-        <div style="font-size: 1.2em;">📁 AI Document Admin</div>
-        <div class="nav-links">
-            <a href="index.php" class="active-link">Admin Panel</a>
-            <a href="dokuwiki.php" style="background: #28a745;">💬 RAG Chat</a>
-            <a href="settings.php">⚙️ Settings</a>
-        </div>
-    </div>
-
-    <?php if ($message): ?>
-        <div class="message"><?php echo htmlspecialchars($message); ?></div>
-    <?php endif; ?>
-
-    <div class="card">
-        <h3>➕ Upload New Document</h3>
-        <form method="POST" enctype="multipart/form-data">
-            <textarea name="pasted_text" placeholder="Paste article content here..."></textarea>
-            <div style="margin-top: 15px; display: flex; justify-content: space-between;">
-                <input type="file" name="file_upload" accept=".txt">
-                <button type="submit" class="btn btn-blue">Upload & AI Analyze</button>
-            </div>
-        </form>
-    </div>
-
-    <table>
-        <thead>
-            <tr>
-                <th width="50">ID</th>
-                <th>Details</th>
-                <th width="200">Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach ($docs as $doc): ?>
-            <tr>
-                <td><?php echo $doc['id']; ?></td>
-                <td>
-                    <strong><?php echo htmlspecialchars($doc['title']); ?></strong><br>
-                    <small style="color:#666;"><?php echo htmlspecialchars($doc['description']); ?></small><br>
-                    <?php if(!empty($doc['tags'])) foreach(explode(',',$doc['tags']) as $t) echo "<span class='tag'>#$t</span>"; ?>
-                </td>
-                <td>
-                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:5px;">
-                        <button class="btn btn-outline" onclick='openEdit(<?php echo json_encode($doc); ?>)'>✏️ Edit</button>
-                        <form method="POST" onsubmit="return confirm('Are you sure you want to delete this document?');">
-                            <input type="hidden" name="action" value="delete">
-                            <input type="hidden" name="id" value="<?php echo $doc['id']; ?>">
-                            <button type="submit" class="btn btn-red" style="width:100%;">🗑️ Delete</button>
-                        </form>
-                        <form method="POST">
-                            <input type="hidden" name="action" value="regenerate">
-                            <input type="hidden" name="id" value="<?php echo $doc['id']; ?>">
-                            <button type="submit" class="btn btn-green" style="width:100%;">🤖 Analyze</button>
-                        </form>
-                        <form method="POST">
-                            <input type="hidden" name="action" value="rewrite">
-                            <input type="hidden" name="id" value="<?php echo $doc['id']; ?>">
-                            <button type="submit" class="btn btn-blue" style="width:100%;">✍️ Rewrite</button>
-                        </form>
-                    </div>
-                </td>
-            </tr>
-            <?php endforeach; ?>
-        </tbody>
-    </table>
-
-    <div id="editModal">
-        <div class="modal-content">
-            <h3>📝 Manual Edit Document</h3>
-            <form method="POST">
-                <input type="hidden" name="action" value="update_manual">
-                <input type="hidden" name="id" id="edit_id">
-                <label>Title:</label><br>
-                <input type="text" name="title" id="edit_title" style="width:100%; margin-bottom:10px;"><br>
-                <label>Description:</label><br>
-                <input type="text" name="description" id="edit_desc" style="width:100%; margin-bottom:10px;"><br>
-                <label>Tags (comma separated):</label><br>
-                <input type="text" name="tags" id="edit_tags" style="width:100%; margin-bottom:10px;"><br>
-                <label>Content:</label><br>
-                <textarea name="content" id="edit_content" style="height:200px; padding:10px; border:1px solid #ccc; width:100%; box-sizing:border-box; font-family:inherit;"></textarea><br>
-                <div style="text-align:right; margin-top:10px;">
-                    <button type="button" class="btn btn-outline" onclick="document.getElementById('editModal').style.display='none'">Cancel</button>
-                    <button type="submit" class="btn btn-blue">Save Changes</button>
-                </div>
+    <!-- 頂部導覽列 -->
+    <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm px-4 py-2">
+        <a class="navbar-brand fw-bold text-primary" href="#"><i class="bi bi-robot"></i> <?= $t['title'] ?></a>
+        <div class="d-flex ms-auto align-items-center gap-3">
+            <a href="dataset.php" class="btn btn-outline-primary btn-sm"><i class="bi bi-database"></i> <?= $t['manage_data'] ?></a>
+            <a href="?clear=1" class="btn btn-outline-danger btn-sm" title="<?= $t['clear_memory'] ?>"><i class="bi bi-eraser-fill"></i></a>
+            
+            <form method="get" class="mb-0">
+                <select name="lang" class="form-select form-select-sm shadow-sm" onchange="this.form.submit()" style="min-width: 90px;">
+                    <option value="zh" <?= $lang === 'zh' ? 'selected' : '' ?>>中文</option>
+                    <option value="en" <?= $lang === 'en' ? 'selected' : '' ?>>English</option>
+                </select>
             </form>
+        </div>
+    </nav>
+
+    <!-- 對話顯示區 -->
+    <div class="chat-container" id="chatBox">
+        <div class="message-row assistant">
+            <div class="message-bubble shadow-sm">
+                <i class="bi bi-stars text-warning"></i> <?= $t['welcome'] ?>
+            </div>
+        </div>
+        
+        <?php foreach ($_SESSION['chat_history'] as $msg): ?>
+            <?php if(empty(trim($msg['content']))) continue; // 前端也不渲染空訊息 ?>
+            <div class="message-row <?= $msg['role'] ?>">
+                <div class="message-bubble shadow-sm content-markdown">
+                    <?= htmlspecialchars($msg['content']) ?>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    </div>
+
+    <!-- 輸入區 -->
+    <div class="chat-input-area">
+        <div class="container-fluid max-w-custom p-0">
+            <div class="input-group input-group-lg shadow-sm rounded-pill">
+                <textarea id="userInput" class="form-control border-0" rows="1" placeholder="<?= $t['type_message'] ?>" onkeydown="handleEnter(event)"></textarea>
+                <button class="btn btn-primary px-4 rounded-pill border-0" style="border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important;" id="sendBtn" onclick="sendMessage()">
+                    <i class="bi bi-send-fill"></i>
+                </button>
+            </div>
         </div>
     </div>
 
     <script>
-    function openEdit(doc) {
-        document.getElementById('edit_id').value = doc.id;
-        document.getElementById('edit_title').value = doc.title;
-        document.getElementById('edit_desc').value = doc.description;
-        document.getElementById('edit_tags').value = doc.tags;
-        document.getElementById('edit_content').value = doc.content;
-        document.getElementById('editModal').style.display = 'block';
-    }
-    </script>
+        const chatBox = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+        const sendBtn = document.getElementById('sendBtn');
+        
+        // 介面文字 (JS版)
+        const t_bot_typing = <?= json_encode($t['bot_typing']) ?>;
+        const t_sys_error = <?= json_encode($t['sys_error']) ?>;
+        const t_reference = <?= json_encode($t['reference']) ?>;
+        const t_attachments = <?= json_encode($t['attachments']) ?>;
 
+        // 初始化渲染 Markdown
+        // 設定 marked.js 支援 GitHub 格式與自動換行
+marked.use({
+    breaks: true,
+    gfm: true
+});
+
+// 初始化渲染 Markdown (修正 HTML 層級判斷)
+document.querySelectorAll('.content-markdown').forEach(el => {
+    // el 是 .message-bubble，它的父元素是 .message-row
+    if(el.parentElement.classList.contains('assistant')) {
+        el.innerHTML = marked.parse(el.textContent);
+    } else {
+        // 使用者輸入保留換行
+        el.innerHTML = el.textContent.replace(/\n/g, '<br>');
+    }
+});
+
+        function scrollToBottom() {
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+        scrollToBottom();
+
+        function handleEnter(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            // 1. 顯示使用者訊息
+            appendMessage('user', text);
+            userInput.value = '';
+            userInput.style.height = 'auto'; // reset height
+
+            // 2. 顯示 AI 思考中
+            const typingId = 'typing-' + Date.now();
+            appendMessage('assistant', `<span class="spinner-grow spinner-grow-sm text-primary" role="status"></span> ${t_bot_typing}`, typingId);
+
+            // 3. 發送 AJAX 請求
+            const formData = new URLSearchParams();
+            formData.append('message', text);
+
+            try {
+                sendBtn.disabled = true;
+                const response = await fetch('index.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: formData.toString()
+                });
+                
+                const result = await response.json();
+                document.getElementById(typingId).remove(); // 移除思考中
+
+                if (result.status === 'success') {
+                    // 組合回答內容與參考文獻
+                    let finalHTML = marked.parse(result.answer);
+                    
+                    // 【步驟 6】：附上參考文件名稱與附件
+                    if (result.references && result.references.length > 0) {
+                        let refHTML = `<div class="ref-box"><div class="fw-bold mb-1"><i class="bi bi-book"></i> ${t_reference}:</div><ul class="mb-0 ps-3">`;
+                        
+                        result.references.forEach(ref => {
+                            refHTML += `<li>
+                                <a href="dataset.php?action=edit_content&id=${ref.id}" target="_blank">${ref.title}</a>`;
+                            
+                            // 附件處理
+                            if (ref.attachments.length > 0) {
+                                refHTML += ` <span class="text-muted ms-2">[${t_attachments}: `;
+                                let attLinks = ref.attachments.map(att => `<a href="${att.filepath}" target="_blank" class="text-info"><i class="bi bi-paperclip"></i>${att.filename}</a>`);
+                                refHTML += attLinks.join(', ') + `]`;
+                            }
+                            refHTML += `</li>`;
+                        });
+                        refHTML += `</ul></div>`;
+                        finalHTML += refHTML;
+                    }
+
+                    appendRawHTML('assistant', finalHTML);
+                } else {
+                    appendMessage('assistant', t_sys_error + result.message);
+                }
+            } catch (error) {
+                document.getElementById(typingId)?.remove();
+                appendMessage('assistant', t_sys_error + error.message);
+            } finally {
+                sendBtn.disabled = false;
+                scrollToBottom();
+            }
+        }
+
+        function appendMessage(role, text, id = '') {
+            const div = document.createElement('div');
+            div.className = `message-row ${role}`;
+            if (id) div.id = id;
+            
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble shadow-sm';
+            
+            if (role === 'user') {
+                bubble.innerText = text;
+            } else {
+                bubble.innerHTML = text; // typing animation requires HTML
+            }
+            
+            div.appendChild(bubble);
+            chatBox.appendChild(div);
+            scrollToBottom();
+        }
+
+        function appendRawHTML(role, htmlStr) {
+            const div = document.createElement('div');
+            div.className = `message-row ${role}`;
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble shadow-sm';
+            bubble.innerHTML = htmlStr;
+            div.appendChild(bubble);
+            chatBox.appendChild(div);
+            scrollToBottom();
+        }
+
+        // Textarea auto-resize
+        userInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            if (this.scrollHeight > 150) {
+                this.style.overflowY = 'auto';
+            } else {
+                this.style.overflowY = 'hidden';
+            }
+        });
+    </script>
 </body>
 </html>
