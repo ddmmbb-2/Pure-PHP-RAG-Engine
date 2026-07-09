@@ -78,7 +78,6 @@ function callLLM($messages, $temperature = 0.3) {
 
     $payload = [
         'model' => $model,
-        // 使用 array_values 確保送出的是乾淨的 JSON 陣列 (避免出現 {"0":...})
         'messages' => array_values($messages),
         'temperature' => $temperature
     ];
@@ -116,7 +115,6 @@ function callLLM($messages, $temperature = 0.3) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
     header('Content-Type: application/json');
     
-    // 嚴格檢查空訊息
     $userMsg = trim((string)$_POST['message']);
     if ($userMsg === '') {
         echo json_encode(['status' => 'error', 'message' => '訊息內容不可為空']);
@@ -124,17 +122,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
     }
     
     try {
-        // 【步驟 1】：LLM 針對使用者問題 -> 拆解成標籤
-        $tagPrompt = "請從以下使用者的提問中，萃取出關鍵字標籤。請務必依據使用者輸入的語言進行萃取。只回傳一個 JSON 陣列（例如：[\"關鍵字1\", \"關鍵字2\"]），不要加上引號、```json 等任何多餘標記。\n\n提問：\n" . $userMsg;
+        // 【步驟 1】：LLM 針對使用者問題 -> 拆解成標籤（逗號分隔）
+        $tagPrompt = "請從以下使用者的提問中，萃取出最重要的關鍵字標籤。只回傳用逗號分隔的關鍵字（例如：關鍵字1,關鍵字2,關鍵字3），不要加入任何多餘的文字、引號、JSON 格式或說明。\n\n提問：\n" . $userMsg;
         $tagMessages = [
-            ['role' => 'system', 'content' => 'You are a keyword extraction bot.'],
+            ['role' => 'system', 'content' => 'You are a keyword extraction bot. Output only comma-separated keywords.'],
             ['role' => 'user', 'content' => $tagPrompt]
         ];
         $tagResponse = callLLM($tagMessages, 0.1);
-        $tagResponse = preg_replace('/^```(json)?\s*|\s*```$/m', '', $tagResponse);
-        $extractedTags = json_decode($tagResponse, true);
+        // 清理可能的多餘符號（例如 LLM 仍可能輸出引號）
+        $tagResponse = trim($tagResponse, " \t\n\r\0\x0B\"'[]{}");
+        // 以逗號拆分，並過濾空值
+        $extractedTags = array_filter(array_map('trim', explode(',', $tagResponse)), function($tag) {
+            return $tag !== '';
+        });
         
-        if (!is_array($extractedTags)) {
+        // 若完全解析失敗，退回以原始問題作為標籤
+        if (empty($extractedTags)) {
             $extractedTags = [$userMsg];
         }
 
@@ -148,7 +151,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
             $dbTags = json_decode($article['tags'], true) ?: [];
             
             foreach ($extractedTags as $searchTag) {
-                if (trim($searchTag) === '') continue; // 略過空的標籤
                 $searchTagLower = mb_strtolower($searchTag);
                 
                 if (mb_strpos(mb_strtolower($article['title']), $searchTagLower) !== false) $score += 10;
@@ -177,6 +179,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
             return $b['final_score'] <=> $a['final_score'];
         });
 
+
+
         // 【步驟 4】：準備 Context 給 LLM
         $contextText = "";
         $referenceDocs = [];
@@ -190,9 +194,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
             $contextText .= $docStr;
             $currentCharCount += mb_strlen($docStr);
             
+            // 【重要修改】將文章完整內容 (content) 一併傳給前端，供彈出視窗顯示
             $referenceDocs[] = [
                 'id' => $article['id'],
                 'title' => $article['title'],
+                'content' => $article['content'],
                 'attachments' => getAttachments($article['id'])
             ];
         }
@@ -202,7 +208,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
 請根據以下提供的【參考資料】來回答問題。如果參考資料中沒有答案，請根據你的知識回答，但要註明資料庫中未包含此資訊。
 【參考資料開始】\n" . ($contextText ?: "無相關資料") . "\n【參考資料結束】";
 
-        // 準備對話歷史 (嚴格過濾空訊息，避免報錯)
         $messages = [];
         $messages[] = ['role' => 'system', 'content' => (string)$sysPrompt];
         
@@ -211,7 +216,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
         for ($i = count($_SESSION['chat_history']) - 1; $i >= 0; $i--) {
             $h = $_SESSION['chat_history'][$i];
             
-            // 嚴密防禦：若歷史紀錄中缺少 role、content 或 content 為空，則捨棄不送給 LLM
             if (!isset($h['role']) || !isset($h['content']) || trim((string)$h['content']) === '') {
                 continue; 
             }
@@ -219,25 +223,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
             $historyCharCount += mb_strlen($h['content']);
             if ($historyCharCount > 4000) break; 
             
-            // 確保只傳送合法的 key 格式
             array_unshift($tempHistory, [
                 'role' => $h['role'],
                 'content' => (string)$h['content']
             ]);
         }
         $messages = array_merge($messages, $tempHistory);
-        
-        // 加入本次問題 (已確認非空)
         $messages[] = ['role' => 'user', 'content' => $userMsg];
 
-        // 呼叫 LLM 產出最終回答
         $finalAnswer = callLLM($messages, 0.5);
 
-        // 將本次對話寫入 Session (確保寫入前非空)
         if (trim($finalAnswer) !== '') {
-            $_SESSION['chat_history'][] = ['role' => 'user', 'content' => $userMsg];
-            $_SESSION['chat_history'][] = ['role' => 'assistant', 'content' => $finalAnswer];
-        }
+    $_SESSION['chat_history'][] = ['role' => 'user', 'content' => $userMsg];
+    $_SESSION['chat_history'][] = [
+        'role' => 'assistant',
+        'content' => $finalAnswer,
+        'references' => $referenceDocs   // ★ 新增
+    ];
+}
 
         // 【步驟 6】：回傳最終答案與參考文件
         echo json_encode([
@@ -259,8 +262,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $t['title'] ?></title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
         body { background-color: #f0f2f5; height: 100vh; display: flex; flex-direction: column; }
         .chat-container { flex: 1; overflow-y: auto; padding: 20px; }
@@ -273,20 +276,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
         textarea.form-control { resize: none; border-radius: 20px; padding-left: 20px; padding-right: 20px; }
         .ref-box { font-size: 0.85em; background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 10px; margin-top: 12px; }
         .ref-box a { text-decoration: none; font-weight: 500; }
-        /* Markdown rendering basic styles */
+        /* Markdown 專屬美化樣式 */
+        .message-bubble h1, .message-bubble h2, .message-bubble h3, .message-bubble h4 { font-weight: bold; margin-top: 12px; margin-bottom: 8px; line-height: 1.4; }
+        .message-bubble h3 { font-size: 1.15rem; }
+        .message-bubble ul, .message-bubble ol { padding-left: 1.5rem; margin-bottom: 10px; }
+        .message-bubble li { margin-bottom: 4px; }
+        .message-bubble p { margin-bottom: 10px; }
+        .message-bubble p:last-child { margin-bottom: 0; }
+        .message-bubble strong { color: #000; font-weight: 700; }
         .message-bubble pre { background: #2b2b2b; color: #f8f8f2; padding: 10px; border-radius: 5px; overflow-x: auto; margin-top: 10px;}
         .message-bubble code { font-family: monospace; }
-/* Markdown 專屬美化樣式 */
-.message-bubble h1, .message-bubble h2, .message-bubble h3, .message-bubble h4 { font-weight: bold; margin-top: 12px; margin-bottom: 8px; line-height: 1.4; }
-.message-bubble h3 { font-size: 1.15rem; }
-.message-bubble ul, .message-bubble ol { padding-left: 1.5rem; margin-bottom: 10px; }
-.message-bubble li { margin-bottom: 4px; }
-.message-bubble p { margin-bottom: 10px; }
-.message-bubble p:last-child { margin-bottom: 0; }
-.message-bubble strong { color: #000; font-weight: 700; }
+
+.main-wrapper {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #f0f2f5;
+}
+.chat-container {
+    flex: 1;
+    overflow-y: auto;
+}
+.chat-input-area {
+    flex-shrink: 0;
+}
+/* 桌面板最大寬度容器邊緣陰影可選 */
+@media (min-width: 768px) {
+    .main-wrapper {
+        box-shadow: 0 0 20px rgba(0,0,0,0.05);
+    }
+}
+
     </style>
-<!-- 引入 marked.js 解析 Markdown (使用穩定的 4.3.0 版本) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
+    <!-- 引入 marked.js 解析 Markdown (使用穩定的 4.3.0 版本) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/4.3.0/marked.min.js"></script>
 </head>
 <body>
 
@@ -306,6 +329,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
         </div>
     </nav>
 
+
+<div class="main-wrapper mx-auto" style="max-width: 900px; width: 100%;">
     <!-- 對話顯示區 -->
     <div class="chat-container" id="chatBox">
         <div class="message-row assistant">
@@ -315,7 +340,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
         </div>
         
         <?php foreach ($_SESSION['chat_history'] as $msg): ?>
-            <?php if(empty(trim($msg['content']))) continue; // 前端也不渲染空訊息 ?>
+            <?php if(empty(trim($msg['content']))) continue; ?>
             <div class="message-row <?= $msg['role'] ?>">
                 <div class="message-bubble shadow-sm content-markdown">
                     <?= htmlspecialchars($msg['content']) ?>
@@ -336,7 +361,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
         </div>
     </div>
 
+    <!-- 【新增】參考文件檢視 Modal -->
+    <div class="modal fade" id="docModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg">
+            <div class="modal-content shadow">
+                <div class="modal-header bg-light border-bottom">
+                    <h5 class="modal-title fw-bold text-primary" id="docModalTitle"></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body bg-white text-dark" style="font-size: 1.05rem; line-height: 1.8;">
+                    <div id="docModalContent" style="white-space: pre-wrap; word-break: break-word;"></div>
+                </div>
+                <div class="modal-footer bg-light border-top">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">關閉</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+
+
+// --- 將 PHP 傳出的 assistant references 轉為 JavaScript 物件 ---
+const assistantRefsMap = <?= json_encode($assistantRefsMap) ?>;  // key: msgIndex, value: references陣列
+
+// 初始化全域 cache (供 modal 使用)
+window.referenceCache = window.referenceCache || {};
+
+// 頁面載入後，將歷史訊息中的參考文件區塊補上
+document.addEventListener('DOMContentLoaded', function() {
+    // 遍歷所有有 refs 的訊息泡泡
+    document.querySelectorAll('.message-row[data-msg-index]').forEach(row => {
+        const index = parseInt(row.dataset.msgIndex);
+        const refs = assistantRefsMap[index];
+        if (!refs) return;
+        
+        const container = row.querySelector('.ref-box-container');
+        if (!container) return;
+        
+        // 將文件內容存入全域 cache
+        refs.forEach(ref => {
+            window.referenceCache[ref.id] = ref;
+        });
+        
+        // 建立參考文件列表 HTML
+        let refHTML = `<div class="ref-box"><div class="fw-bold mb-1"><i class="bi bi-book"></i> ${t_reference}:</div><ul class="mb-0 ps-3">`;
+        refs.forEach(ref => {
+            refHTML += `<li>
+                <a href="javascript:void(0)" onclick="showDocument(${ref.id})" class="text-decoration-none text-primary fw-medium">
+                    <i class="bi bi-file-earmark-text"></i> ${ref.title}
+                </a>`;
+            if (ref.attachments && ref.attachments.length > 0) {
+                refHTML += ` <span class="text-muted ms-2">[${t_attachments}: `;
+                let attLinks = ref.attachments.map(att => `<a href="${att.filepath}" target="_blank" class="text-info"><i class="bi bi-paperclip"></i>${att.filename}</a>`);
+                refHTML += attLinks.join(', ') + `]`;
+            }
+            refHTML += `</li>`;
+        });
+        refHTML += `</ul></div>`;
+        container.innerHTML = refHTML;
+    });
+});
+
+
         const chatBox = document.getElementById('chatBox');
         const userInput = document.getElementById('userInput');
         const sendBtn = document.getElementById('sendBtn');
@@ -347,23 +437,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['message'])) {
         const t_reference = <?= json_encode($t['reference']) ?>;
         const t_attachments = <?= json_encode($t['attachments']) ?>;
 
-        // 初始化渲染 Markdown
-        // 設定 marked.js 支援 GitHub 格式與自動換行
-marked.use({
-    breaks: true,
-    gfm: true
-});
+        // 全域暫存，用來儲存文件的完整內容
+        window.referenceCache = {};
 
-// 初始化渲染 Markdown (修正 HTML 層級判斷)
-document.querySelectorAll('.content-markdown').forEach(el => {
-    // el 是 .message-bubble，它的父元素是 .message-row
-    if(el.parentElement.classList.contains('assistant')) {
-        el.innerHTML = marked.parse(el.textContent);
-    } else {
-        // 使用者輸入保留換行
-        el.innerHTML = el.textContent.replace(/\n/g, '<br>');
-    }
-});
+        // 設定 marked.js 支援 GitHub 格式與自動換行
+        marked.use({
+            breaks: true,
+            gfm: true
+        });
+
+        // 初始化渲染 Markdown
+        document.querySelectorAll('.content-markdown').forEach(el => {
+            if(el.parentElement.classList.contains('assistant')) {
+                el.innerHTML = marked.parse(el.textContent);
+            } else {
+                el.innerHTML = el.textContent.replace(/\n/g, '<br>');
+            }
+        });
 
         function scrollToBottom() {
             chatBox.scrollTop = chatBox.scrollHeight;
@@ -377,20 +467,33 @@ document.querySelectorAll('.content-markdown').forEach(el => {
             }
         }
 
+        // 開啟文件檢視 Modal 的函數
+        let docModalInstance = null;
+        function showDocument(id) {
+    const doc = window.referenceCache[id];
+    if (!doc) {
+        alert('文件資料遺失，請重新發送訊息。');
+        return;
+    }
+    document.getElementById('docModalTitle').innerText = doc.title;
+    document.getElementById('docModalContent').textContent = doc.content;
+    if (!docModalInstance) {
+        docModalInstance = new bootstrap.Modal(document.getElementById('docModal'));
+    }
+    docModalInstance.show();
+}
+
         async function sendMessage() {
             const text = userInput.value.trim();
             if (!text) return;
 
-            // 1. 顯示使用者訊息
             appendMessage('user', text);
             userInput.value = '';
-            userInput.style.height = 'auto'; // reset height
+            userInput.style.height = 'auto';
 
-            // 2. 顯示 AI 思考中
             const typingId = 'typing-' + Date.now();
             appendMessage('assistant', `<span class="spinner-grow spinner-grow-sm text-primary" role="status"></span> ${t_bot_typing}`, typingId);
 
-            // 3. 發送 AJAX 請求
             const formData = new URLSearchParams();
             formData.append('message', text);
 
@@ -403,21 +506,26 @@ document.querySelectorAll('.content-markdown').forEach(el => {
                 });
                 
                 const result = await response.json();
-                document.getElementById(typingId).remove(); // 移除思考中
+                document.getElementById(typingId).remove();
 
                 if (result.status === 'success') {
-                    // 組合回答內容與參考文獻
                     let finalHTML = marked.parse(result.answer);
                     
-                    // 【步驟 6】：附上參考文件名稱與附件
+                    // 【步驟 6】：附上參考文件名稱與附件 (改為觸發 Modal)
                     if (result.references && result.references.length > 0) {
                         let refHTML = `<div class="ref-box"><div class="fw-bold mb-1"><i class="bi bi-book"></i> ${t_reference}:</div><ul class="mb-0 ps-3">`;
                         
                         result.references.forEach(ref => {
+                            // 將文件存入暫存
+                            window.referenceCache[ref.id] = ref;
+
+                            // 產生呼叫 Modal 的連結 (而不是跳轉 edit_content)
                             refHTML += `<li>
-                                <a href="dataset.php?action=edit_content&id=${ref.id}" target="_blank">${ref.title}</a>`;
+                                <a href="javascript:void(0)" onclick="showDocument(${ref.id})" class="text-decoration-none text-primary fw-medium">
+                                    <i class="bi bi-file-earmark-text"></i> ${ref.title}
+                                </a>`;
                             
-                            // 附件處理
+                            // 附件維持另開分頁下載
                             if (ref.attachments.length > 0) {
                                 refHTML += ` <span class="text-muted ms-2">[${t_attachments}: `;
                                 let attLinks = ref.attachments.map(att => `<a href="${att.filepath}" target="_blank" class="text-info"><i class="bi bi-paperclip"></i>${att.filename}</a>`);
@@ -453,7 +561,7 @@ document.querySelectorAll('.content-markdown').forEach(el => {
             if (role === 'user') {
                 bubble.innerText = text;
             } else {
-                bubble.innerHTML = text; // typing animation requires HTML
+                bubble.innerHTML = text;
             }
             
             div.appendChild(bubble);
@@ -472,7 +580,6 @@ document.querySelectorAll('.content-markdown').forEach(el => {
             scrollToBottom();
         }
 
-        // Textarea auto-resize
         userInput.addEventListener('input', function() {
             this.style.height = 'auto';
             this.style.height = (this.scrollHeight) + 'px';
